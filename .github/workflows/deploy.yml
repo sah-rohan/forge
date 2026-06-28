@@ -1,0 +1,78 @@
+name: Deploy Forge API
+
+# Build the Forge kernel image, push to ACR, and roll the Container App.
+# Runs after infra exists (Terraform provisions ACR + the Container App).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "cmd/**"
+      - "kernel/**"
+      - "agents/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  deploy:
+    name: Build & deploy
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Discover the Terraform-created resources by tag/name convention.
+      - name: Resolve resource names
+        id: rg
+        run: |
+          RG="forge-rg"
+          ACR=$(az acr list --resource-group "$RG" --query "[0].name" -o tsv)
+          ACR_SERVER=$(az acr show --name "$ACR" --query loginServer -o tsv)
+          echo "rg=$RG"            >> "$GITHUB_OUTPUT"
+          echo "acr=$ACR"          >> "$GITHUB_OUTPUT"
+          echo "acr_server=$ACR_SERVER" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push image
+        run: |
+          az acr login --name "${{ steps.rg.outputs.acr }}"
+          IMG="${{ steps.rg.outputs.acr_server }}/forge-api"
+          docker build -t "$IMG:${{ github.sha }}" -t "$IMG:latest" .
+          docker push "$IMG:${{ github.sha }}"
+          docker push "$IMG:latest"
+
+      - name: Roll the Container App to the new image
+        run: |
+          az containerapp update \
+            --name forge-api \
+            --resource-group "${{ steps.rg.outputs.rg }}" \
+            --image "${{ steps.rg.outputs.acr_server }}/forge-api:${{ github.sha }}"
+
+      - name: Show app URL
+        run: |
+          az containerapp show --name forge-api --resource-group "${{ steps.rg.outputs.rg }}" \
+            --query properties.configuration.ingress.fqdn -o tsv

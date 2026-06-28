@@ -1,0 +1,30 @@
+# Binaries
+/forge
+/api
+/server
+*.exe
+
+# Local env
+.env
+.env.*
+
+# Forge run sandboxes (cloned repos)
+/tmp/forge-runs/
+forge-runs/
+
+# Go
+*.test
+*.out
+
+# Editor
+.DS_Store
+.idea/
+.vscode/
+
+# Terraform
+infra/.terraform/
+infra/.terraform.lock.hcl
+infra/*.tfstate
+infra/*.tfstate.*
+infra/terraform.tfvars
+infra/*.tfplan
