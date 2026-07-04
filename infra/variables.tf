@@ -1,7 +1,7 @@
 variable "name" {
-  description = "Base name for all resources (resource group, OpenAI account)."
+  description = "Base name for all resources. Must be globally unique-ish because it drives ACR, Key Vault, and the OpenAI subdomain — all of which live in GLOBAL namespaces. Keep the random suffix."
   type        = string
-  default     = "forge"
+  default     = "forge3adc8d"
 }
 
 variable "location" {
