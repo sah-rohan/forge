@@ -80,15 +80,17 @@ resource "azurerm_container_app" "api" {
     identity = "System"
   }
 
-  # Secrets sourced from Key Vault via the app's managed identity.
+  # Secrets sourced from Key Vault via the app's managed identity. Use the
+  # versionLESS id so rotating a secret doesn't force the container to re-plan
+  # against a pinned version (which trips a provider "inconsistent plan" bug).
   secret {
     name                = "azure-openai-key"
-    key_vault_secret_id = azurerm_key_vault_secret.openai_key.id
+    key_vault_secret_id = azurerm_key_vault_secret.openai_key.versionless_id
     identity            = "System"
   }
   secret {
     name                = "forge-api-key"
-    key_vault_secret_id = azurerm_key_vault_secret.forge_api_key.id
+    key_vault_secret_id = azurerm_key_vault_secret.forge_api_key.versionless_id
     identity            = "System"
   }
 
