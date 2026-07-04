@@ -13,7 +13,7 @@ terraform {
   # local-only use, comment this block out to fall back to local state.
   backend "azurerm" {
     resource_group_name  = "forge-tfstate-rg"
-    storage_account_name = "forgetfstate"
+    storage_account_name = "forgetfstatea52008"
     container_name       = "tfstate"
     key                  = "forge.tfstate"
     use_oidc             = true

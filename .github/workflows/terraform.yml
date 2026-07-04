@@ -28,7 +28,7 @@ env:
   TF_VAR_forge_api_key: ${{ secrets.FORGE_API_KEY }}
   # State backend location (created once by the bootstrap step below).
   STATE_RG:        forge-tfstate-rg
-  STATE_SA:        forgetfstate
+  STATE_SA:        forgetfstatea52008
   STATE_CONTAINER: tfstate
   STATE_LOCATION:  eastus
 
