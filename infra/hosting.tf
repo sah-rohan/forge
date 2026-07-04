@@ -22,20 +22,21 @@ resource "azurerm_key_vault" "kv" {
   sku_name            = "standard"
 }
 
-# The applier (CI SP or you) needs to write secrets.
-resource "azurerm_key_vault_access_policy" "applier" {
-  key_vault_id       = azurerm_key_vault.kv.id
-  tenant_id          = data.azurerm_client_config.current.tenant_id
-  object_id          = data.azurerm_client_config.current.object_id
-  secret_permissions = ["Get", "List", "Set", "Delete", "Purge", "Recover"]
-}
+# NOTE: The "applier" identity's Key Vault access (permission to write the
+# secrets below) is granted OUT OF BAND, not via a Terraform-managed policy.
+# A TF-managed policy keyed on data.azurerm_client_config.current.object_id
+# thrashes between "you" (local) and "the CI service principal" (Actions),
+# forcing a destroy/recreate each time you switch — which 403s the secret
+# writes mid-apply. Instead both identities are granted once via:
+#   az keyvault set-policy --name forge3adc8d-kv --object-id <oid> \
+#     --secret-permissions get list set delete purge recover
+# Done for the CI SP (b8fd5a3e...) and the developer (e9307664...).
 
 # Store the OpenAI key Terraform already created, so the app reads it from KV.
 resource "azurerm_key_vault_secret" "openai_key" {
   name         = "azure-openai-key"
   value        = azurerm_cognitive_account.openai.primary_access_key
   key_vault_id = azurerm_key_vault.kv.id
-  depends_on   = [azurerm_key_vault_access_policy.applier]
 }
 
 # The API gate key (X-Forge-Key) consumers send. Supplied via TF_VAR or tfvars.
@@ -43,7 +44,6 @@ resource "azurerm_key_vault_secret" "forge_api_key" {
   name         = "forge-api-key"
   value        = var.forge_api_key
   key_vault_id = azurerm_key_vault.kv.id
-  depends_on   = [azurerm_key_vault_access_policy.applier]
 }
 
 # --- Observability ---
