@@ -19,13 +19,13 @@ variable "deployment_name" {
 variable "model_name" {
   description = "Azure OpenAI base model to deploy."
   type        = string
-  default     = "gpt-4o-mini"
+  default     = "gpt-4.1-mini"
 }
 
 variable "model_version" {
-  description = "Model version. Check availability in your region if apply fails."
+  description = "Model version. Check availability in your region if apply fails (az cognitiveservices account list-models)."
   type        = string
-  default     = "2024-07-18"
+  default     = "2025-04-14"
 }
 
 variable "capacity" {
