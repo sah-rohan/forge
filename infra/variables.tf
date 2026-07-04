@@ -11,21 +11,27 @@ variable "location" {
 }
 
 variable "deployment_name" {
-  description = "Name of the model deployment. This is what Forge sends as AZURE_OPENAI_DEPLOYMENT (NOT the model name)."
+  description = "Name of the model deployment. This is what Forge sends as AZURE_OPENAI_DEPLOYMENT (NOT the model name). Kept model-agnostic ('chat') so swapping the underlying model doesn't require renaming the deployment."
   type        = string
-  default     = "gpt-4o-mini"
+  default     = "chat"
 }
 
 variable "model_name" {
   description = "Azure OpenAI base model to deploy."
   type        = string
-  default     = "gpt-4.1-mini"
+  default     = "gpt-5-mini"
 }
 
 variable "model_version" {
   description = "Model version. Check availability in your region if apply fails (az cognitiveservices account list-models)."
   type        = string
-  default     = "2025-04-14"
+  default     = "2025-08-07"
+}
+
+variable "sku_type" {
+  description = "Deployment SKU type. Newer models (gpt-5*) require 'GlobalStandard', older ones use 'Standard'. Check the model's skus[] via list-models."
+  type        = string
+  default     = "GlobalStandard"
 }
 
 variable "capacity" {

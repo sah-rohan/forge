@@ -60,7 +60,7 @@ resource "azurerm_cognitive_deployment" "chat" {
   }
 
   scale {
-    type     = "Standard"
+    type     = var.sku_type
     capacity = var.capacity # thousands of tokens-per-minute
   }
 }
