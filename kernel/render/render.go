@@ -32,8 +32,36 @@ const (
 	KindMockInterview     = "mock_interview"
 	KindBehavioralFeedback = "behavioral_feedback"
 	KindPRPlan            = "pr_plan"
+	KindTutorReply        = "tutor_reply"
 	KindError             = "error"
 )
+
+// TutorReply — one turn from the study tutor. Say is the prose answer; Show is
+// an optional directive the frontend renders with its OWN components (Kronos'
+// SVG diagrams/animations) - the model never generates graphics, it selects
+// and parameterizes them, which is what keeps this cheap and correct.
+type TutorReply struct {
+	Say       string     `json:"say"`
+	Show      *TutorShow `json:"show,omitempty"`
+	FollowUps []string   `json:"follow_ups,omitempty"` // suggested next questions
+}
+
+// TutorShow selects a frontend visual. Exactly one family of fields applies
+// per type.
+type TutorShow struct {
+	// "system_diagram" | "walkthrough" | "concept" | "algo"
+	Type string `json:"type"`
+	// system_diagram / walkthrough: which problem's diagram, and (walkthrough)
+	// which hop to highlight.
+	ProblemSlug string `json:"problem_slug,omitempty"`
+	Step        int    `json:"step,omitempty"`
+	// concept: id of a concept illustration ("trie", "hash_ring", ...).
+	ConceptID string `json:"concept_id,omitempty"`
+	// algo: named animation with its input, e.g. "two_pointer" on an array.
+	AlgoID string `json:"algo_id,omitempty"`
+	Input  []int  `json:"input,omitempty"`
+	Target int    `json:"target,omitempty"`
+}
 
 // ResumeGrill — interviewer-style probes generated from a resume. Each probe
 // ties back to the exact resume line it interrogates, so the UI can highlight

@@ -12,6 +12,7 @@ import (
 	"os"
 
 	"github.com/rohansah/forge/agents/resume"
+	"github.com/rohansah/forge/agents/tutor"
 	"github.com/rohansah/forge/kernel"
 	"github.com/rohansah/forge/kernel/model"
 	"github.com/rohansah/forge/kernel/server"
@@ -25,6 +26,7 @@ func main() {
 
 	reg := kernel.NewRegistry()
 	reg.Register(resume.New())
+	reg.Register(tutor.New())
 	// future: reg.Register(skillgraph.New()), reg.Register(mockinterview.New()), …
 
 	srv := server.New(reg, m, os.Getenv("FORGE_API_KEY"))

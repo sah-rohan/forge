@@ -27,9 +27,37 @@ export interface ResumeGrill {
   probes: Probe[];
 }
 
+// One turn from the study tutor. `show` selects a frontend-owned visual (the
+// model never draws): Kronos maps it to its existing SVG diagram components.
+export interface TutorShow {
+  type: "system_diagram" | "walkthrough" | "concept" | "algo";
+  problem_slug?: string;
+  step?: number;
+  concept_id?: string;
+  algo_id?: string;
+  input?: number[];
+  target?: number;
+}
+
+export interface TutorReply {
+  say: string;
+  show?: TutorShow;
+  follow_ups?: string[];
+}
+
+export interface TutorContext {
+  question: string;
+  history?: { role: "user" | "tutor"; content: string }[];
+  solved?: { slug: string; title: string; difficulty: string; code?: string; lang?: string }[];
+  modules?: { slug: string; title: string; kind: "design" | "genai"; solved: boolean }[];
+  concepts?: string[];
+  algos?: string[];
+}
+
 // The discriminated union the UI switches on. Extend as agents are added.
 export type AgentOutput =
   | { kind: "resume_grill"; data: ResumeGrill }
+  | { kind: "tutor_reply"; data: TutorReply }
   | { kind: "error"; data: { message: string } }
   // forward-declared kinds (typed `unknown` until their schemas land):
   | { kind: "skill_graph"; data: unknown }
@@ -89,6 +117,19 @@ export class ForgeClient {
   }): Promise<ResumeGrill> {
     const out = await this.run("resume-grill", input);
     if (out.kind !== "resume_grill") {
+      throw new Error(
+        out.kind === "error"
+          ? (out.data as { message: string }).message
+          : `unexpected kind ${out.kind}`,
+      );
+    }
+    return out.data;
+  }
+
+  /** Convenience wrapper for the study tutor agent. */
+  async tutor(input: TutorContext): Promise<TutorReply> {
+    const out = await this.run("tutor", input);
+    if (out.kind !== "tutor_reply") {
       throw new Error(
         out.kind === "error"
           ? (out.data as { message: string }).message
