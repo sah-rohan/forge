@@ -1,100 +1,154 @@
-# Forge
+<h1 align="center">Forge</h1>
 
-**A context-driven AI agent kernel.** One engine, many agents: give it context
-(a code repo, a resume, a LeetCode history, a job posting), it reasons with an
-LLM, and returns **typed, frontend-renderable output**. Consumers (the career
-app, Kronos, internal automation) call one uniform API and render the result by
-`kind`.
+<p align="center">
+  Authentication for Azure OpenAI, as a library.<br>
+  You give it a credential; it resolves, caches, refreshes, and attaches it.
+</p>
 
-The design goal is FoundationDB-style versatility: **nothing about a consumer
-is compiled into Forge.** Context sources, the model provider, and output
-shapes are all pluggable.
+<p align="center">
+  <code>go/</code> · <code>node/</code> — same API, both runtimes
+</p>
 
-## The three seams
+---
 
-```
-context  ──►  model  ──►  render
- (what the    (Claude /    (typed output:
-  agent       Azure AI,     a discriminated
-  knows)      swappable)    union the UI maps
-                            to components)
-```
+It holds no secrets and runs no service. You import it and call it in-process.
 
-- **`kernel/model`** — `Model` interface with `Anthropic` + `AzureOpenAI`
-  implementations. Chosen per deploy via `FORGE_MODEL_PROVIDER`; agents never
-  see a vendor.
-- **`kernel/render`** — every agent returns `Output{ kind, data }`. The TS SDK
-  mirrors these as a discriminated union so the frontend renders one component
-  per kind and never parses prose.
-- **`kernel`** — the `Agent` interface + `Registry`. An agent owns its context
-  adapter, prompt, and output schema. Adding one is a single `Register` call.
-
-## Layout
-
-```
-kernel/            the reusable engine (the IP)
-  model/           LLM providers behind one interface
-  render/          typed output schemas
-  server/          POST /v1/agents/{name}/run  — the uniform API
-agents/            opinionated agents built on the kernel
-  resume/          resume-grill: resume -> interviewer questions (typed)
-  prbot/           (planned) GitHub PR agent — see internal/ webhook plumbing
-cmd/
-  api/             kernel HTTP API server  (the career app / Kronos call this)
-  server/          GitHub App webhook receiver (the PR agent's event entrypoint)
-sdk/ts/            TypeScript client for React apps
-internal/          PR-agent plumbing: GitHub App auth, sandbox clone, profiler
-```
-
-Two entrypoints share one kernel:
-- **`cmd/api`** — request/response agents (resume-grill, future skill-graph,
-  mock-interview). This is what frontends call.
-- **`cmd/server`** — the GitHub PR agent, which is event-driven (webhook), not
-  request/response. Both are model-bound, so the network hop between a consumer
-  and Forge is <0.1% of total latency — agents are split by *coupling*, never
-  by milliseconds.
-
-## Run the kernel API locally
+<table>
+<tr><th align="left" width="50%">Go</th><th align="left" width="50%">Node</th></tr>
+<tr valign="top"><td>
 
 ```bash
-export FORGE_MODEL_PROVIDER=anthropic      # or "azure"
-export ANTHROPIC_API_KEY=sk-ant-...        # for anthropic
-# export AZURE_OPENAI_ENDPOINT=... AZURE_OPENAI_DEPLOYMENT=... AZURE_OPENAI_KEY=...
-go run ./cmd/api                            # :8090
-
-curl -s localhost:8090/v1/agents/resume-grill/run \
-  -H 'content-type: application/json' \
-  -d '{"context":{"resume":"Founding engineer at ISF. Built a Redis→Postgres translation cache with placeholder protection; hardened Stripe webhooks (signature + idempotency); shipped Terraform infra on Azure.","target_role":"Backend SWE"}}' | jq
+go get github.com/sah-rohan/forge/go@v0.2.0
 ```
 
-Returns `{ "kind": "resume_grill", "data": { summary, probes[...] } }` — each
-probe tied to a resume line, with the question an interviewer would ask, what
-it tests, and a model answer.
+</td><td>
 
-## Call it from React
+```bash
+npm install @sah-rohan/forge
+```
+
+</td></tr>
+</table>
+
+Both are private, so each needs credentials once per machine.
+
+<details>
+<summary><b>Go setup</b></summary>
+
+```bash
+go env -w GOPRIVATE=github.com/sah-rohan/*
+git config --global url."git@github.com:".insteadOf https://github.com/
+```
+</details>
+
+<details>
+<summary><b>Node setup</b> — a GitHub token with <code>read:packages</code></summary>
+
+In your `.npmrc`:
+
+```
+@sah-rohan:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+```
+</details>
+
+## Use
+
+An authenticated HTTP client. That's the whole surface.
+
+<table>
+<tr><th align="left" width="50%">Go</th><th align="left" width="50%">Node</th></tr>
+<tr valign="top"><td>
+
+```go
+import "github.com/sah-rohan/forge/go"
+
+client := forge.Client(forge.Default())
+
+resp, err := client.Post(url,
+    "application/json", body)
+```
+
+</td><td>
 
 ```ts
-import { ForgeClient } from "@forge/sdk";
+import { authorizedFetch, defaultCredential }
+  from "@sah-rohan/forge";
 
-const forge = new ForgeClient({ baseUrl: import.meta.env.VITE_FORGE_URL, apiKey });
-const grill = await forge.resumeGrill({ resume, target_role: "Backend SWE, Stripe" });
-// grill.probes -> render <ProbeCard> for each
+const fetch = authorizedFetch(defaultCredential());
+
+const res = await fetch(url,
+  { method: "POST", body });
 ```
 
-## Roadmap
+</td></tr>
+<tr valign="top"><td>
 
-- [x] Kernel seams (model / render / agent registry)
-- [x] Resume-grill agent + typed output + TS SDK
-- [x] GitHub App plumbing (auth, sandbox clone, zero-assumption repo profiler)
-- [ ] PR agent: context engine (RAG + past-PR mining) → verified draft PRs
-- [ ] Skill-graph agent (LeetCode history → mastery map)
-- [ ] Calibrated mock-interview agent (adaptive difficulty / IRT)
-- [ ] Behavioral agent (STAR/CARL critique from real project context)
-- [ ] Budget governor (per-run cost caps, idempotency)
-- [ ] React component library for each output kind
+Hand `client` to anything taking an `*http.Client`.
 
-## Testing
+</td><td>
+
+`authorizedFetch` is a drop-in `fetch` — pass it to
+the `openai` package's `fetch` option.
+
+</td></tr>
+</table>
+
+`Default()` / `defaultCredential()` is a per-process singleton. Call it
+anywhere; you get the same cached credential.
+
+Or take the headers directly:
+
+<table>
+<tr valign="top"><td width="50%">
+
+```go
+h, err := forge.Default().Headers(ctx)
+```
+
+</td><td width="50%">
+
+```ts
+const h = await defaultCredential().headers();
+```
+
+</td></tr>
+</table>
+
+## Configure
+
+Set nothing and it uses the managed identity of whatever it's running on.
+To override:
+
+| Variable | |
+|---|---|
+| `AZURE_OPENAI_KEY_FILE` | Key on disk, re-read as it rotates |
+| `AZURE_OPENAI_KEY` | Key held inline |
+| `AZURE_OPENAI_SCOPE` | Overrides the default Entra ID scope |
+
+Resolved in that order. Or pick a credential explicitly:
+
+| | Go | Node |
+|---|---|---|
+| Managed identity | `EntraID("")` | `entraID()` |
+| Key on disk | `KeyFile(path)` | `keyFile(path)` |
+| Key in hand | `StaticKey(k)` | `staticKey(k)` |
+| Something else | `FromTokenProvider(fn)` | `fromTokenProvider(fn)` |
+
+## Repo
+
+```
+go/       the Go package
+node/     the Node package, same API
+infra/    the Azure account and its role assignments
+```
+
+**Test:** `cd go && go test ./...` · `cd node && npm test`
+Neither needs a key, an identity, or a network.
+
+**Release:** Go resolves from a subdirectory tag, npm from CI.
 
 ```bash
-go test ./...     # agents tested with a fake model — no API key needed
+git tag v0.2.0 && git tag go/v0.2.0
+git push origin v0.2.0 go/v0.2.0
 ```
