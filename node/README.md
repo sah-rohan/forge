@@ -1,98 +1,99 @@
-# @sah-rohan/forge
+# `@sah-rohan/forge`
 
-The Forge model kernel for Node — Azure OpenAI behind named modes, with tools,
-agents, structured output, and streaming.
+The Node half of [Forge](../README.md) — an authentication kernel for Azure
+OpenAI. It resolves, caches, refreshes, and attaches credentials, and does
+nothing else.
 
-Not a service. You import it and call it in-process, so the only network request
-in a run is the one to the model. The identical API exists for Go in this repo's
-root package, so a TypeScript service and a Go service run the same prompts
-against the same modes.
+A library, not a service. It contains no credentials; you supply one.
 
 ## Install
 
-Published privately to GitHub Packages. In your `.npmrc`:
+```bash
+npm install @sah-rohan/forge
+```
+
+Published privately to GitHub Packages. In the consumer's `.npmrc`:
 
 ```
 @sah-rohan:registry=https://npm.pkg.github.com
 //npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
 ```
 
-```bash
-npm install @sah-rohan/forge
-```
-
-Requires Node 20+ (for `fetch`, `AbortSignal.any`, and `AbortSignal.timeout`).
-
 ## Use
 
 ```ts
-import { Kernel, user, schemaOf, tool, FAST, DEEP } from "@sah-rohan/forge";
+import { authorizedFetch, defaultCredential } from "@sah-rohan/forge";
 
-const kernel = Kernel.fromEnv();
+const fetch = authorizedFetch(defaultCredential());
 
-// One call.
-const res = await kernel.complete({
-  mode: FAST,
-  system: "You summarize in one sentence.",
-  messages: [user(text)],
-});
-
-// Structured output, typed.
-const plan = await kernel.json<StudyPlan>({
-  mode: DEEP,
-  messages: [user(history)],
-  schema: schemaOf("study_plan", planSchema),
-});
-
-// An agent with tools.
-const search = tool<{ query: string }>({
-  name: "search",
-  description: "Search the docs.",
-  parameters: {
-    type: "object",
-    properties: { query: { type: "string" } },
-    required: ["query"],
+const res = await fetch(
+  `${process.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/gpt-5/chat/completions?api-version=2024-10-21`,
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "hello" }] }),
   },
-  handler: async ({ query }) => index.search(query),
-});
-
-const out = await kernel.run(
-  { system: "Answer from the docs. Cite what you used.", tools: [search] },
-  [user(question)],
 );
-console.log(out.text, out.usage);
+```
 
-// Streaming.
-await kernel.stream({ messages: [user(q)] }, (chunk) => {
-  if (chunk.text) response.write(chunk.text);
+`authorizedFetch` returns a drop-in `fetch`, so it goes straight into any client
+that accepts one:
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: `${endpoint}/openai/deployments/gpt-5`,
+  apiKey: "unused",
+  fetch: authorizedFetch(defaultCredential()),
 });
 ```
 
-A tool with no `handler` is deliberate: the run stops and returns the call in
-`result.pending` for you to execute — how a confirmation prompt or a
-client-side action works.
+Or take the headers yourself:
+
+```ts
+const headers = await defaultCredential().headers();
+```
+
+## API
+
+| | |
+|---|---|
+| `defaultCredential()` | The process-wide credential. One token cache for the whole app — use this. |
+| `fromEnv(env?)` | Builds an independent credential from the environment. |
+| `entraID(scope?, opts?)` | Managed identity, workload identity, or service principal. |
+| `keyFile(path)` | Account key on disk, re-read as it rotates. |
+| `staticKey(key)` | Account key held in memory. |
+| `fromTokenProvider(fn)` | Wraps `@azure/identity` or any other token source. |
+| `authorizedFetch(cred, base?)` | A `fetch` that authenticates and reauthenticates on 401. |
+| `resetDefaultCredential()` | Clears the singleton. For tests. |
+
+Every credential implements one interface:
+
+```ts
+interface Credential {
+  headers(): Promise<Record<string, string>>;
+  invalidate?(): void;
+}
+```
+
+`headers()` is called on every request, which is what lets an expiring token or
+a rotating key work without a restart. `invalidate()` exists on the caching
+credentials and is what `authorizedFetch` calls after a 401.
 
 ## Configuration
 
-`Kernel.fromEnv()` reads:
+`AZURE_OPENAI_KEY_FILE`, then `AZURE_OPENAI_KEY`, then Entra ID. Setting none of
+them is the intended production configuration. See the
+[root README](../README.md#configuration).
 
-| Variable | |
-|---|---|
-| `AZURE_OPENAI_ENDPOINT` | required |
-| `AZURE_OPENAI_KEY` | required |
-| `AZURE_OPENAI_API_VERSION` | optional |
-| `FORGE_MODE_FAST` / `_BALANCED` / `_DEEP` | deployment name per mode |
-| `FORGE_DEFAULT_MODE` | optional |
-
-Any `FORGE_MODE_<NAME>` defines a mode, so custom modes need no code change.
-Pass a `Config` to the constructor instead when you load settings yourself.
-
-## Develop
+## Development
 
 ```bash
+npm run build      # tsc
+npm test           # build, then node --test
 npm run typecheck
-npm test          # 26 cases against a stub fetch; no key, no network
-npm run build
 ```
 
-Full documentation is in the [repo README](../README.md).
+Zero runtime dependencies; `typescript` and `@types/node` are dev-only. The test
+suite needs no key, no identity, and no network.

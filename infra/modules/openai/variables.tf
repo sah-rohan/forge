@@ -71,3 +71,17 @@ variable "tags" {
     ManagedBy = "Terraform"
   }
 }
+
+variable "role_assignments" {
+  description = <<-EOT
+    Principal object IDs granted "Cognitive Services OpenAI User" on the
+    account, keyed by a stable name so adding one does not move the others.
+
+    This is the other half of Entra ID auth: the package acquires a token, and
+    this is what makes that token mean something. Grant every consumer's
+    managed identity here, then set local_auth_enabled = false and the account
+    key stops existing as an attack surface.
+  EOT
+  type        = map(string)
+  default     = {}
+}

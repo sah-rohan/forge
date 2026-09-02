@@ -7,10 +7,13 @@ are libraries you *import*; this is a module you *call*. Neither is a running
 service, and neither knows anything about the app consuming it.
 
 ```
-code   →  import "github.com/sah-rohan/forge"      // Go
-          import { Kernel } from "@sah-rohan/forge" // Node
+code   →  import "github.com/sah-rohan/forge"                    // Go
+          import { defaultCredential } from "@sah-rohan/forge"   // Node
 infra  →  module "openai" { source = ".../infra/modules/openai" }
 ```
+
+The package authenticates against this account; this module creates it, its
+deployments, and the role assignments that let a managed identity call them.
 
 ## What it owns
 
@@ -21,8 +24,8 @@ infra  →  module "openai" { source = ".../infra/modules/openai" }
 | `azurerm_cognitive_deployment` × modes | One per mode, created with `for_each`. |
 
 **The deployment name is the mode name.** Mode `fast` is served by a deployment
-literally called `fast`, so `FORGE_MODE_FAST=fast` and no lookup table exists
-anywhere. Changing which model backs a mode is a change to `var.modes` — no
+literally called `fast`, so `FORGE_MODE_FAST=fast` in your application's
+settings and no lookup table exists anywhere. Changing which model backs a mode is a change to `var.modes` — no
 consumer redeploys, no code edits, no call sites touched.
 
 ## Usage

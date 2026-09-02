@@ -75,3 +75,14 @@ resource "azurerm_cognitive_deployment" "mode" {
     capacity = each.value.capacity
   }
 }
+
+# Data-plane access for each consumer's identity. "Cognitive Services OpenAI
+# User" is inference-only: it can call deployments but cannot create, change,
+# or read the keys of the account.
+resource "azurerm_role_assignment" "openai_user" {
+  for_each = var.role_assignments
+
+  scope                = azurerm_cognitive_account.openai.id
+  role_definition_name = "Cognitive Services OpenAI User"
+  principal_id         = each.value
+}

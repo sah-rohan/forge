@@ -76,7 +76,8 @@ eval "$(terraform output -json forge_env | jq -r 'to_entries[] | "export \(.key)
 ```
 
 That leaves `AZURE_OPENAI_ENDPOINT` plus one `FORGE_MODE_*` per mode in the
-environment — exactly what `forge.FromEnv()` and `Kernel.fromEnv()` read.
+environment. Those are your application's configuration — Forge itself only
+authenticates, and reads none of them.
 
 ### From a consumer's Terraform
 
@@ -107,6 +108,10 @@ locals {
 Add a mode in `variables.tf` here, apply, and it appears in every consumer's
 `forge_env` on their next apply. Neither kernel needs a code change — both
 discover modes from `FORGE_MODE_*` at startup.
+
+Under Entra ID auth (`local_auth_enabled = false` plus `role_assignments`)
+there is no `AZURE_OPENAI_KEY` to merge in at all, and `forge_env` is the
+complete, entirely non-secret configuration.
 
 ## Customize
 

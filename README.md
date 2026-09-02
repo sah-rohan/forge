@@ -1,12 +1,20 @@
 # Forge
 
-**A model kernel.** One small library that activates the Azure OpenAI API and
-gives every consumer the same way to run AI — modes, tools, agents, structured
-output.
+**An authentication kernel for Azure OpenAI.** One small library that resolves,
+caches, refreshes, and attaches the credentials your services use to call the
+model — and does nothing else.
 
-Forge is **not a service**. You import it and call it in-process, so the only
-network request in a run is the one to the model. It ships twice, with the same
-API in both, because consumers are split across two runtimes:
+It is **not a service.** You import it and call it in-process. It opens no port,
+exposes no endpoint, and adds no network hop. The only requests it ever makes
+are to an identity endpoint, on your behalf, about once an hour.
+
+It **contains no credentials.** A credential is something you supply — a managed
+identity, a mounted file, or a key you hold. Nothing secret is compiled in,
+checked in, or published with it, which is why this repository is safe to make
+public regardless of who consumes it.
+
+It ships twice, with the same API in both, because consumers are split across
+two runtimes:
 
 | | Import | Source |
 |---|---|---|
@@ -14,25 +22,26 @@ API in both, because consumers are split across two runtimes:
 | **Node** | `@sah-rohan/forge` | [`node/`](node/) |
 | **Terraform** | `modules/openai` | [`infra/modules/openai/`](infra/modules/openai/) |
 
-Nothing about a consumer is compiled into Forge. Agents, retrieval, prompts, and
-chains are ordinary code you write in *your* repo against this interface. The
-kernel stays opinion-free.
+## The one idea
 
-## Three ideas
+**A credential is resolved per request, not captured at startup.**
 
-**Modes.** You ask for `fast`, `balanced`, or `deep` — a class of model, not a
-deployment name. Which model serves each mode is configuration, so upgrading a
-model never touches a call site. Both kernels discover modes from `FORGE_MODE_*`
-environment variables at startup, so adding one is an infra change and nothing
-else.
+Everything else follows from that. A bearer token that expires in an hour, an
+account key remounted by Kubernetes, a secret rotated in Key Vault — all of them
+keep working without a restart, because nothing is frozen into the process at
+construction time.
 
-**Tools.** Declare functions the model may call. `Complete` hands back the calls
-it wants and executes nothing; `Run` executes them and loops until the model has
-an answer. A tool with no handler is deliberate — the run stops and hands the
-call to you, which is how a confirmation prompt or a client-side action works.
+Around that sit four behaviours you would otherwise write in every service:
 
-**Structured output.** Give it a JSON Schema and decode straight into your own
-type. Nothing parses prose.
+- **Caching.** A token is acquired once and reused until it is nearly expired,
+  with a five-minute skew so a long call never starts on a dying token.
+- **Coalescing.** Twenty concurrent requests arriving on an expired token
+  produce one call to the identity endpoint, not twenty.
+- **Reauthentication.** A request rejected with 401 invalidates the cached
+  token and retries once, so a revoked token recovers on its own instead of
+  failing every call until the process restarts.
+- **A singleton.** `Default()` builds the credential once per process, so one
+  token cache serves your whole binary.
 
 ## Go
 
@@ -40,57 +49,43 @@ type. Nothing parses prose.
 go get github.com/sah-rohan/forge
 ```
 
-The repo is private, and Go needs no registry — `go get` reads the git repo
-directly:
+The repo needs no registry — `go get` reads the git repo directly. If you keep
+it private:
 
 ```bash
 go env -w GOPRIVATE=github.com/sah-rohan/*
 git config --global url."git@github.com:".insteadOf https://github.com/
 ```
 
-`GOPRIVATE` also bypasses the public proxy and checksum database, so the code
-never leaves your network.
+```go
+// An HTTP client that authenticates everything it sends.
+client := forge.Client(forge.Default())
+
+resp, err := client.Post(
+    endpoint+"/openai/deployments/gpt-5/chat/completions?api-version=2024-10-21",
+    "application/json", body,
+)
+```
+
+Hand that client to any SDK that accepts an `*http.Client` and authentication
+stops being something your code thinks about. If you already have a transport
+worth keeping — tracing, connection tuning, a proxy — wrap it instead:
 
 ```go
-k, err := forge.FromEnv()
+client := &http.Client{Transport: forge.Transport(forge.Default(), myTransport)}
+```
 
-// One call.
-res, err := k.Complete(ctx, forge.Request{
-    Mode:     forge.ModeFast,
-    System:   "You summarize in one sentence.",
-    Messages: []forge.Message{forge.User(text)},
-})
-fmt.Println(res.Text)
+And if you want the headers yourself:
 
-// Straight into a struct.
-var plan StudyPlan
-err = k.JSON(ctx, forge.Request{
-    Mode:     forge.ModeDeep,
-    System:   "Build a study plan.",
-    Messages: []forge.Message{forge.User(history)},
-    Schema:   forge.SchemaOf("study_plan", planSchema),
-}, &plan)
-
-// An agent with tools.
-search := forge.NewTool("search", "Search the docs.", searchSchema,
-    func(ctx context.Context, a struct{ Query string }) (string, error) {
-        return index.Search(ctx, a.Query)
-    })
-
-out, err := k.Run(ctx, forge.Agent{
-    System: "Answer from the docs. Cite what you used.",
-    Tools:  []forge.Tool{search},
-}, forge.User(question))
-fmt.Println(out.Text, out.Usage)
-
-// Streaming.
-_, err = k.Stream(ctx, req, func(c forge.Chunk) error {
-    io.WriteString(w, c.Text)
-    return nil
-})
+```go
+headers, err := forge.Default().Headers(ctx)
 ```
 
 ## Node
+
+```bash
+npm install @sah-rohan/forge
+```
 
 Published privately to GitHub Packages. In the consumer's `.npmrc`:
 
@@ -99,88 +94,141 @@ Published privately to GitHub Packages. In the consumer's `.npmrc`:
 //npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
 ```
 
-```bash
-npm install @sah-rohan/forge
+```ts
+import { authorizedFetch, defaultCredential } from "@sah-rohan/forge";
+
+const fetch = authorizedFetch(defaultCredential());
+
+const res = await fetch(
+  `${endpoint}/openai/deployments/gpt-5/chat/completions?api-version=2024-10-21`,
+  { method: "POST", body: JSON.stringify(payload) },
+);
 ```
 
+`authorizedFetch` returns a drop-in `fetch`, so it goes straight into any client
+that accepts one — including the official `openai` package's `fetch` option. Or
+take the headers directly:
+
 ```ts
-import { Kernel, user, schemaOf, FAST, DEEP } from "@sah-rohan/forge";
+const headers = await defaultCredential().headers();
+```
 
-const kernel = Kernel.fromEnv();
+## Credentials
 
-const res = await kernel.complete({
-  mode: FAST,
-  system: "You summarize in one sentence.",
-  messages: [user(text)],
-});
+Four implementations cover the ground. All of them satisfy one interface, so
+swapping between them is a one-line change at startup and nothing downstream
+notices.
 
-const plan = await kernel.json<StudyPlan>({
-  mode: DEEP,
-  messages: [user(history)],
-  schema: schemaOf("study_plan", planSchema),
-});
+| | Go | Node | Use |
+|---|---|---|---|
+| Managed identity | `EntraID("")` | `entraID()` | **Production.** No secret anywhere. |
+| Key on disk | `KeyFile(path)` | `keyFile(path)` | Key auth that can rotate. |
+| Key in hand | `StaticKey(k)` | `staticKey(k)` | Local development, tests. |
+| Anything else | `FromTokenProvider(fn)` | `fromTokenProvider(fn)` | `azidentity`, `@azure/identity`, a broker. |
 
-const out = await kernel.run(
-  { system: "Answer from the docs.", tools: [search] },
-  [user(question)],
-);
+`EntraID` is the one to deploy with, because with it the application holds no
+secret at all: nothing in app settings, nothing in Terraform state, nothing to
+rotate. Its identity flow is detected from the environment:
 
-await kernel.stream({ messages: [user(q)] }, (c) => res.write(c.text));
+| Environment | Flow |
+|---|---|
+| `AZURE_FEDERATED_TOKEN_FILE` | Workload identity federation (AKS) |
+| `AZURE_CLIENT_SECRET` | Service principal |
+| `IDENTITY_ENDPOINT` | App Service / Container Apps managed identity |
+| *(none of the above)* | IMDS managed identity (VMs, VMSS) |
+
+Anything outside that list plugs in through `FromTokenProvider` rather than
+being built in, which is what keeps this package dependency-free:
+
+```go
+cred := forge.FromTokenProvider(func(ctx context.Context) (string, time.Time, error) {
+    t, err := azCred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{forge.DefaultScope}})
+    return t.Token, t.ExpiresOn, err
+})
 ```
 
 ## Configuration
 
-Both kernels read the same environment, so one set of app settings configures
-either:
+Both runtimes read the same environment, so one set of app settings configures a
+Go service and a Node service without translation.
 
 | Variable | |
 |---|---|
-| `AZURE_OPENAI_ENDPOINT` | required — `https://<resource>.openai.azure.com` |
-| `AZURE_OPENAI_KEY` | required |
-| `AZURE_OPENAI_API_VERSION` | optional |
-| `FORGE_MODE_FAST` | deployment name serving `fast` |
-| `FORGE_MODE_BALANCED` | deployment name serving `balanced` |
-| `FORGE_MODE_DEEP` | deployment name serving `deep` |
-| `FORGE_DEFAULT_MODE` | optional; defaults to `balanced` when configured |
+| `AZURE_OPENAI_KEY_FILE` | Account key on disk, re-read as it rotates |
+| `AZURE_OPENAI_KEY` | Account key held inline |
+| `AZURE_OPENAI_SCOPE` | Optional — overrides the default Entra ID scope |
 
-Any `FORGE_MODE_<NAME>` defines a mode, so custom modes need no code change.
-`AZURE_OPENAI_DEPLOYMENT` alone points all three standard modes at one
-deployment — enough to start, split later.
+The credential is resolved in that order: key file, then inline key, then Entra
+ID. Explicit keys win so an existing deployment keeps working untouched; the
+file form is preferred over the inline one because it can rotate; Entra ID is
+preferred over both because it means there is no secret to hold.
 
-`infra/` emits exactly these as a `forge_env` output. See
-[infra/README.md](infra/README.md).
+Setting none of them is the intended production configuration.
 
-## What you get for free
+## Sharing one credential
 
-- **Retries** on 429s, 5xx, and connection failures — honoring `Retry-After`,
-  otherwise exponential backoff with jitter. A stream that already emitted
-  tokens is never retried.
-- **Typed errors** carrying Azure's own code, so you branch on `content_filter`
-  or `context_length_exceeded` without matching strings.
-- **Usage accounting** on every call, including cached and reasoning tokens,
-  with an `OnUsage` hook for cost tracking and budgets.
-- **Reassembled streaming tool calls** — arguments arrive fragmented across SSE
-  frames and are joined before you see them.
-- **Zero dependencies** in Go; only `typescript`/`@types/node` as dev
-  dependencies in Node.
+`forge.Default()` / `defaultCredential()` build the credential once per process
+and hand the same instance to every caller. Use it.
+
+Sharing is not a convenience — it is the optimization. A credential caches its
+token and coalesces its refreshes, so **one instance means one token fetch per
+hour for the whole binary.** Two instances mean two of everything: two caches,
+two refresh cycles, two chances to be mid-refresh when a request arrives. Build
+your own with `FromEnv` / `fromEnv` only when you genuinely need a second
+identity.
+
+Resolution is lazy. Nothing touches the environment or the network until the
+first call, and no token is acquired until the first request needs one.
+
+## Infrastructure
+
+[`infra/modules/openai`](infra/modules/openai/) provisions the account this
+authenticates against, and the role assignments that make an Entra ID token
+mean something:
+
+```hcl
+module "openai" {
+  source = "git::ssh://git@github.com/sah-rohan/forge.git//infra/modules/openai?ref=v0.2.0"
+
+  name     = "forge3adc8d"
+  location = "eastus"
+
+  modes = {
+    fast = { model = "gpt-5-mini", version = "2025-08-07", capacity = 30 }
+    deep = { model = "gpt-5",      version = "2025-08-07", capacity = 10 }
+  }
+
+  role_assignments = {
+    api    = azurerm_linux_web_app.api.identity[0].principal_id
+    worker = azurerm_container_app.worker.identity[0].principal_id
+  }
+
+  local_auth_enabled = false
+}
+```
+
+`role_assignments` grants **Cognitive Services OpenAI User** — inference only,
+with no ability to create deployments, change the account, or read its keys.
+With every consumer listed there, `local_auth_enabled = false` removes key auth
+entirely and the account key stops existing as an attack surface.
+
+The module also outputs the endpoint and its deployment names. Those are your
+application's configuration, not this package's — Forge authenticates; what you
+call and with which model is yours to decide.
 
 ## Layout
 
 ```
-forge.go, types.go, azure.go, agent.go   the Go kernel
-node/src/                                the Node kernel (same API)
-infra/                                   Azure OpenAI + one deployment per mode
+auth.go                    the Go kernel
+node/src/auth.ts           the Node kernel (same API)
+infra/modules/openai/      the account, its deployments, and its role assignments
 ```
-
-`azure.go` and `node/src/azure.ts` are the only files that know the vendor's
-wire format. A second provider means one more file each — not a change to
-agents, tools, or call sites.
 
 ## Testing
 
 ```bash
-go test ./...           # Go kernel, against a stub Azure endpoint
+go test ./...           # Go kernel, against stubbed identity endpoints
 cd node && npm test     # Node kernel, same cases
 ```
 
-Neither suite needs an API key or a network.
+Neither suite needs a key, an identity, or a network.
