@@ -1,10 +1,15 @@
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 export const DEFAULT_SCOPE = "https://cognitiveservices.azure.com/.default";
 
 const DEFAULT_TOKEN_LIFETIME_MS = 55 * 60 * 1000;
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const TOKEN_TIMEOUT_MS = 10_000;
+const IMDS_PROBE_TIMEOUT_MS = 2_000;
 
 export interface Credential {
   headers(): Promise<Record<string, string>>;
@@ -83,15 +88,18 @@ class TokenCredential implements Credential {
   }
 }
 
+export type AzureCLI = (resource: string, signal?: AbortSignal) => Promise<string>;
+
 export interface EntraOptions {
   env?: Record<string, string | undefined>;
   fetch?: typeof globalThis.fetch;
+  exec?: AzureCLI;
 }
 
 export function entraID(scope: string = DEFAULT_SCOPE, opts: EntraOptions = {}): Credential {
   const env = opts.env ?? process.env;
   const doFetch = opts.fetch ?? globalThis.fetch;
-  const [fetchToken, how] = entraFlow(scope || DEFAULT_SCOPE, env, doFetch);
+  const [fetchToken, how] = entraFlow(scope || DEFAULT_SCOPE, env, doFetch, opts.exec ?? runAzureCLI);
   return new TokenCredential(fetchToken, how);
 }
 
@@ -109,6 +117,7 @@ function entraFlow(
   scope: string,
   env: Record<string, string | undefined>,
   doFetch: typeof globalThis.fetch,
+  exec: AzureCLI,
 ): [TokenFetch, string] {
   const tenant = env.AZURE_TENANT_ID ?? "";
   const clientID = env.AZURE_CLIENT_ID ?? "";
@@ -156,10 +165,52 @@ function entraFlow(
     ];
   }
 
+  const resource = resourceOf(scope);
   return [
-    (signal) => imdsToken(doFetch, signal, resourceOf(scope), clientID),
-    "IMDS managed identity",
+    async (signal) => {
+      try {
+        const probe = AbortSignal.any([signal, AbortSignal.timeout(IMDS_PROBE_TIMEOUT_MS)]);
+        return await imdsToken(doFetch, probe, resource, clientID);
+      } catch {
+        return azureCLIToken(resource, exec, signal);
+      }
+    },
+    "managed identity or the Azure CLI",
   ];
+}
+
+const runAzureCLI: AzureCLI = async (resource, signal) => {
+  try {
+    const { stdout } = await execFileAsync(
+      "az",
+      ["account", "get-access-token", "--resource", resource, "--output", "json"],
+      { signal, maxBuffer: 1024 * 1024 },
+    );
+    return stdout;
+  } catch (e) {
+    const err = e as { code?: string; stderr?: string; message: string };
+    if (err.code === "ENOENT") throw new Error("the Azure CLI is not installed");
+    throw new Error(`az account get-access-token: ${(err.stderr || err.message).trim().slice(0, 300)}`);
+  }
+};
+
+async function azureCLIToken(resource: string, exec: AzureCLI, signal?: AbortSignal): Promise<Bearer> {
+  let raw: string;
+  try {
+    raw = await exec(resource, signal);
+  } catch (e) {
+    throw new Error(
+      `no managed identity is reachable and ${(e as Error).message}; ` +
+        "run az login, or set AZURE_OPENAI_KEY for local development",
+    );
+  }
+
+  const body = JSON.parse(raw) as Record<string, unknown>;
+  const token = body.accessToken;
+  if (typeof token !== "string" || !token) throw new Error("az returned no accessToken");
+
+  const expiresOn = numeric(body.expires_on);
+  return bearer(token, expiresOn ? expiresOn * 1000 : Date.now() + DEFAULT_TOKEN_LIFETIME_MS);
 }
 
 export function resourceOf(scope: string): string {
@@ -196,18 +247,11 @@ async function imdsToken(
   const q = new URLSearchParams({ "api-version": "2018-02-01", resource });
   if (clientID) q.set("client_id", clientID);
 
-  try {
-    const res = await doFetch(`http://169.254.169.254/metadata/identity/oauth2/token?${q}`, {
-      headers: { Metadata: "true" },
-      signal,
-    });
-    return await decodeToken(res);
-  } catch (e) {
-    throw new Error(
-      `${(e as Error).message} — no managed identity is reachable here; ` +
-        "set AZURE_OPENAI_KEY (or AZURE_OPENAI_KEY_FILE) for local development",
-    );
-  }
+  const res = await doFetch(`http://169.254.169.254/metadata/identity/oauth2/token?${q}`, {
+    headers: { Metadata: "true" },
+    signal,
+  });
+  return decodeToken(res);
 }
 
 async function appServiceToken(

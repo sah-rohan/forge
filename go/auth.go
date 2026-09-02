@@ -1,6 +1,7 @@
 package forge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +25,8 @@ const (
 	refreshSkew = 5 * time.Minute
 
 	tokenTimeout = 10 * time.Second
+
+	imdsProbeTimeout = 2 * time.Second
 )
 
 type Credential interface {
@@ -212,9 +216,15 @@ func entraFlow(scope string) (tokenFetch, string) {
 		}, "App Service managed identity"
 
 	default:
+		resource := resourceOf(scope)
 		return func(ctx context.Context, hc *http.Client) (bearer, error) {
-			return imdsToken(ctx, hc, resourceOf(scope), clientID)
-		}, "IMDS managed identity"
+			probe, cancel := context.WithTimeout(ctx, imdsProbeTimeout)
+			defer cancel()
+			if tok, err := imdsToken(probe, hc, resource, clientID); err == nil {
+				return tok, nil
+			}
+			return azureCLIToken(ctx, resource)
+		}, "managed identity or the Azure CLI"
 	}
 }
 
@@ -253,12 +263,56 @@ func imdsToken(ctx context.Context, hc *http.Client, resource, clientID string) 
 	}
 	req.Header.Set("Metadata", "true")
 
-	tok, err := doTokenRequest(hc, req)
+	return doTokenRequest(hc, req)
+}
+
+var runAzureCLI = func(ctx context.Context, resource string) ([]byte, error) {
+	path, err := exec.LookPath("az")
 	if err != nil {
-		return bearer{}, fmt.Errorf("%w — no managed identity is reachable here; "+
-			"set AZURE_OPENAI_KEY (or AZURE_OPENAI_KEY_FILE) for local development", err)
+		return nil, fmt.Errorf("the Azure CLI is not installed")
 	}
-	return tok, nil
+
+	cmd := exec.CommandContext(ctx, path, "account", "get-access-token",
+		"--resource", resource, "--output", "json")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail == "" {
+			detail = err.Error()
+		}
+		if len(detail) > 300 {
+			detail = detail[:300] + "…"
+		}
+		return nil, fmt.Errorf("az account get-access-token: %s", detail)
+	}
+	return stdout.Bytes(), nil
+}
+
+func azureCLIToken(ctx context.Context, resource string) (bearer, error) {
+	raw, err := runAzureCLI(ctx, resource)
+	if err != nil {
+		return bearer{}, fmt.Errorf("no managed identity is reachable and %w; "+
+			"run az login, or set AZURE_OPENAI_KEY for local development", err)
+	}
+
+	var out struct {
+		AccessToken string  `json:"accessToken"`
+		ExpiresOn   flexInt `json:"expires_on"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return bearer{}, fmt.Errorf("decode az output: %w", err)
+	}
+	if out.AccessToken == "" {
+		return bearer{}, fmt.Errorf("az returned no accessToken")
+	}
+
+	expires := time.Now().Add(defaultTokenLifetime)
+	if out.ExpiresOn > 0 {
+		expires = time.Unix(int64(out.ExpiresOn), 0)
+	}
+	return bearer{value: out.AccessToken, expires: expires}, nil
 }
 
 func appServiceToken(ctx context.Context, hc *http.Client, resource, clientID string) (bearer, error) {

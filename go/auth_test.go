@@ -494,7 +494,7 @@ func TestEntraFlowSelection(t *testing.T) {
 		{"workload identity", map[string]string{"AZURE_FEDERATED_TOKEN_FILE": "/var/run/token"}, "workload identity federation"},
 		{"service principal", map[string]string{"AZURE_CLIENT_SECRET": "s"}, "service principal"},
 		{"app service", map[string]string{"IDENTITY_ENDPOINT": "http://localhost/token"}, "App Service managed identity"},
-		{"imds default", nil, "IMDS managed identity"},
+		{"imds then cli by default", nil, "managed identity or the Azure CLI"},
 	}
 
 	for _, tc := range cases {
@@ -587,3 +587,84 @@ func (f credentialFunc) Headers(ctx context.Context) (map[string]string, error) 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestAzureCLIToken(t *testing.T) {
+	restore := runAzureCLI
+	t.Cleanup(func() { runAzureCLI = restore })
+
+	exp := time.Now().Add(time.Hour).Unix()
+	runAzureCLI = func(context.Context, string) ([]byte, error) {
+		return fmt.Appendf(nil, `{"accessToken":"cli-token","expires_on":%d,"tokenType":"Bearer"}`, exp), nil
+	}
+
+	tok, err := azureCLIToken(context.Background(), "https://cognitiveservices.azure.com")
+	if err != nil {
+		t.Fatalf("azureCLIToken: %v", err)
+	}
+	if tok.value != "cli-token" {
+		t.Fatalf("token = %q", tok.value)
+	}
+	if got := time.Until(tok.expires); got < 55*time.Minute || got > time.Hour+time.Minute {
+		t.Fatalf("lifetime = %v, want about an hour", got)
+	}
+}
+
+func TestAzureCLITokenDefaultsExpiry(t *testing.T) {
+	restore := runAzureCLI
+	t.Cleanup(func() { runAzureCLI = restore })
+
+	runAzureCLI = func(context.Context, string) ([]byte, error) {
+		return []byte(`{"accessToken":"cli-token"}`), nil
+	}
+
+	tok, err := azureCLIToken(context.Background(), "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := time.Until(tok.expires); got < defaultTokenLifetime-time.Minute {
+		t.Fatalf("lifetime = %v, want the default", got)
+	}
+}
+
+func TestAzureCLIFailureExplainsTheOptions(t *testing.T) {
+	restore := runAzureCLI
+	t.Cleanup(func() { runAzureCLI = restore })
+
+	runAzureCLI = func(context.Context, string) ([]byte, error) {
+		return nil, fmt.Errorf("the Azure CLI is not installed")
+	}
+
+	_, err := azureCLIToken(context.Background(), "r")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"no managed identity", "az login", "AZURE_OPENAI_KEY"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should mention %q, got %q", want, err)
+		}
+	}
+}
+
+func TestFallsBackToTheCLIWhenIMDSIsUnreachable(t *testing.T) {
+	for _, k := range []string{
+		"AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+		"AZURE_FEDERATED_TOKEN_FILE", "IDENTITY_ENDPOINT", "IDENTITY_HEADER",
+	} {
+		t.Setenv(k, "")
+	}
+
+	restore := runAzureCLI
+	t.Cleanup(func() { runAzureCLI = restore })
+	runAzureCLI = func(context.Context, string) ([]byte, error) {
+		return []byte(`{"accessToken":"cli-token","expires_in":3600}`), nil
+	}
+
+	fetch, _ := entraFlow(DefaultScope)
+	tok, err := fetch(context.Background(), &http.Client{Timeout: time.Second})
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if tok.value != "cli-token" {
+		t.Fatalf("token = %q, want the CLI to serve it when IMDS is unreachable", tok.value)
+	}
+}

@@ -1,6 +1,6 @@
 {
   "name": "@sah-rohan/forge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Authentication kernel for Azure OpenAI: managed identity, rotating keys, cached and coalesced tokens.",
   "license": "UNLICENSED",
   "private": false,

@@ -117,8 +117,8 @@ const h = await defaultCredential().headers();
 
 ## Configure
 
-Set nothing and it uses the managed identity of whatever it's running on.
-To override:
+Set nothing and it works in both places: the managed identity of whatever it's
+running on, falling back to your `az login` on a laptop. To override:
 
 | Variable | |
 |---|---|

@@ -9,6 +9,7 @@ export {
   resetDefaultCredential,
   resourceOf,
   staticKey,
+  type AzureCLI,
   type Credential,
   type EntraOptions,
 } from "./auth.js";

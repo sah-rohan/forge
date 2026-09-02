@@ -224,8 +224,11 @@ describe("token caching", () => {
       fetch: async () => {
         throw new Error("connection refused");
       },
+      exec: async () => {
+        throw new Error("the Azure CLI is not installed");
+      },
     });
-    await assert.rejects(() => cred.headers(), /IMDS managed identity/);
+    await assert.rejects(() => cred.headers(), /managed identity or the Azure CLI/);
   });
 });
 
@@ -261,7 +264,7 @@ describe("identity endpoints", () => {
 
   it("carries the endpoint's description into the error", async () => {
     const cred = entraID(DEFAULT_SCOPE, {
-      env: {},
+      env: { AZURE_CLIENT_SECRET: "s", AZURE_TENANT_ID: "t", AZURE_CLIENT_ID: "c" },
       fetch: async () => jsonResponse({ error: "invalid_client", error_description: "secret is expired" }, 400),
     });
     await assert.rejects(() => cred.headers(), /secret is expired/);
@@ -269,7 +272,7 @@ describe("identity endpoints", () => {
 
   it("rejects a response with no access_token", async () => {
     const cred = entraID(DEFAULT_SCOPE, {
-      env: {},
+      env: { AZURE_CLIENT_SECRET: "s", AZURE_TENANT_ID: "t", AZURE_CLIENT_ID: "c" },
       fetch: async () => jsonResponse({ token_type: "Bearer" }),
     });
     await assert.rejects(() => cred.headers(), /no access_token/);
@@ -280,7 +283,7 @@ describe("identity endpoints", () => {
       [{ AZURE_FEDERATED_TOKEN_FILE: "/var/run/token" }, /workload identity federation/],
       [{ AZURE_CLIENT_SECRET: "s" }, /service principal/],
       [{ IDENTITY_ENDPOINT: "http://localhost/token" }, /App Service managed identity/],
-      [{}, /IMDS managed identity/],
+      [{}, /managed identity or the Azure CLI/],
     ];
 
     for (const [env, want] of flows) {
@@ -288,6 +291,9 @@ describe("identity endpoints", () => {
         env,
         fetch: async () => {
           throw new Error("unreachable");
+        },
+        exec: async () => {
+          throw new Error("the Azure CLI is not installed");
         },
       });
       await assert.rejects(() => cred.headers(), want);
@@ -326,5 +332,65 @@ describe("environment resolution and the singleton", () => {
       delete process.env.AZURE_OPENAI_KEY;
       resetDefaultCredential();
     }
+  });
+});
+
+describe("azure cli fallback", () => {
+  const cliCredential = (exec: (r: string) => Promise<string>) =>
+    entraID(DEFAULT_SCOPE, {
+      env: {},
+      fetch: async () => {
+        throw new Error("connection refused");
+      },
+      exec,
+    });
+
+  it("serves a token from the CLI when IMDS is unreachable", async () => {
+    const cred = cliCredential(async () =>
+      JSON.stringify({
+        accessToken: "cli-token",
+        expires_on: Math.floor(Date.now() / 1000) + 3600,
+        tokenType: "Bearer",
+      }),
+    );
+
+    assert.equal((await cred.headers()).authorization, "Bearer cli-token");
+  });
+
+  it("passes the resource, not the scope, to the CLI", async () => {
+    let seen = "";
+    const cred = cliCredential(async (resource) => {
+      seen = resource;
+      return JSON.stringify({ accessToken: "cli-token" });
+    });
+
+    await cred.headers();
+    assert.equal(seen, "https://cognitiveservices.azure.com");
+  });
+
+  it("defaults the expiry when the CLI gives none", async () => {
+    let calls = 0;
+    const cred = cliCredential(async () => {
+      calls++;
+      return JSON.stringify({ accessToken: "cli-token" });
+    });
+
+    await cred.headers();
+    await cred.headers();
+    assert.equal(calls, 1);
+  });
+
+  it("explains the options when the CLI is missing", async () => {
+    const cred = cliCredential(async () => {
+      throw new Error("the Azure CLI is not installed");
+    });
+
+    await assert.rejects(() => cred.headers(), /run az login/);
+    await assert.rejects(() => cred.headers(), /AZURE_OPENAI_KEY/);
+  });
+
+  it("rejects CLI output with no token", async () => {
+    const cred = cliCredential(async () => JSON.stringify({ tokenType: "Bearer" }));
+    await assert.rejects(() => cred.headers(), /no accessToken/);
   });
 });
