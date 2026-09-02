@@ -1,3 +1,3 @@
 module github.com/sah-rohan/forge/go
 
-go 1.25.3
+go 1.24.0
