@@ -1,100 +1,186 @@
 # Forge
 
-**A context-driven AI agent kernel.** One engine, many agents: give it context
-(a code repo, a resume, a LeetCode history, a job posting), it reasons with an
-LLM, and returns **typed, frontend-renderable output**. Consumers (the career
-app, Kronos, internal automation) call one uniform API and render the result by
-`kind`.
+**A model kernel.** One small library that activates the Azure OpenAI API and
+gives every consumer the same way to run AI — modes, tools, agents, structured
+output.
 
-The design goal is FoundationDB-style versatility: **nothing about a consumer
-is compiled into Forge.** Context sources, the model provider, and output
-shapes are all pluggable.
+Forge is **not a service**. You import it and call it in-process, so the only
+network request in a run is the one to the model. It ships twice, with the same
+API in both, because consumers are split across two runtimes:
 
-## The three seams
+| | Import | Source |
+|---|---|---|
+| **Go** | `github.com/sah-rohan/forge` | repo root |
+| **Node** | `@sah-rohan/forge` | [`node/`](node/) |
+| **Terraform** | `modules/openai` | [`infra/modules/openai/`](infra/modules/openai/) |
+
+Nothing about a consumer is compiled into Forge. Agents, retrieval, prompts, and
+chains are ordinary code you write in *your* repo against this interface. The
+kernel stays opinion-free.
+
+## Three ideas
+
+**Modes.** You ask for `fast`, `balanced`, or `deep` — a class of model, not a
+deployment name. Which model serves each mode is configuration, so upgrading a
+model never touches a call site. Both kernels discover modes from `FORGE_MODE_*`
+environment variables at startup, so adding one is an infra change and nothing
+else.
+
+**Tools.** Declare functions the model may call. `Complete` hands back the calls
+it wants and executes nothing; `Run` executes them and loops until the model has
+an answer. A tool with no handler is deliberate — the run stops and hands the
+call to you, which is how a confirmation prompt or a client-side action works.
+
+**Structured output.** Give it a JSON Schema and decode straight into your own
+type. Nothing parses prose.
+
+## Go
+
+```bash
+go get github.com/sah-rohan/forge
+```
+
+The repo is private, and Go needs no registry — `go get` reads the git repo
+directly:
+
+```bash
+go env -w GOPRIVATE=github.com/sah-rohan/*
+git config --global url."git@github.com:".insteadOf https://github.com/
+```
+
+`GOPRIVATE` also bypasses the public proxy and checksum database, so the code
+never leaves your network.
+
+```go
+k, err := forge.FromEnv()
+
+// One call.
+res, err := k.Complete(ctx, forge.Request{
+    Mode:     forge.ModeFast,
+    System:   "You summarize in one sentence.",
+    Messages: []forge.Message{forge.User(text)},
+})
+fmt.Println(res.Text)
+
+// Straight into a struct.
+var plan StudyPlan
+err = k.JSON(ctx, forge.Request{
+    Mode:     forge.ModeDeep,
+    System:   "Build a study plan.",
+    Messages: []forge.Message{forge.User(history)},
+    Schema:   forge.SchemaOf("study_plan", planSchema),
+}, &plan)
+
+// An agent with tools.
+search := forge.NewTool("search", "Search the docs.", searchSchema,
+    func(ctx context.Context, a struct{ Query string }) (string, error) {
+        return index.Search(ctx, a.Query)
+    })
+
+out, err := k.Run(ctx, forge.Agent{
+    System: "Answer from the docs. Cite what you used.",
+    Tools:  []forge.Tool{search},
+}, forge.User(question))
+fmt.Println(out.Text, out.Usage)
+
+// Streaming.
+_, err = k.Stream(ctx, req, func(c forge.Chunk) error {
+    io.WriteString(w, c.Text)
+    return nil
+})
+```
+
+## Node
+
+Published privately to GitHub Packages. In the consumer's `.npmrc`:
 
 ```
-context  ──►  model  ──►  render
- (what the    (Claude /    (typed output:
-  agent       Azure AI,     a discriminated
-  knows)      swappable)    union the UI maps
-                            to components)
+@sah-rohan:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
 ```
 
-- **`kernel/model`** — `Model` interface with `Anthropic` + `AzureOpenAI`
-  implementations. Chosen per deploy via `FORGE_MODEL_PROVIDER`; agents never
-  see a vendor.
-- **`kernel/render`** — every agent returns `Output{ kind, data }`. The TS SDK
-  mirrors these as a discriminated union so the frontend renders one component
-  per kind and never parses prose.
-- **`kernel`** — the `Agent` interface + `Registry`. An agent owns its context
-  adapter, prompt, and output schema. Adding one is a single `Register` call.
+```bash
+npm install @sah-rohan/forge
+```
+
+```ts
+import { Kernel, user, schemaOf, FAST, DEEP } from "@sah-rohan/forge";
+
+const kernel = Kernel.fromEnv();
+
+const res = await kernel.complete({
+  mode: FAST,
+  system: "You summarize in one sentence.",
+  messages: [user(text)],
+});
+
+const plan = await kernel.json<StudyPlan>({
+  mode: DEEP,
+  messages: [user(history)],
+  schema: schemaOf("study_plan", planSchema),
+});
+
+const out = await kernel.run(
+  { system: "Answer from the docs.", tools: [search] },
+  [user(question)],
+);
+
+await kernel.stream({ messages: [user(q)] }, (c) => res.write(c.text));
+```
+
+## Configuration
+
+Both kernels read the same environment, so one set of app settings configures
+either:
+
+| Variable | |
+|---|---|
+| `AZURE_OPENAI_ENDPOINT` | required — `https://<resource>.openai.azure.com` |
+| `AZURE_OPENAI_KEY` | required |
+| `AZURE_OPENAI_API_VERSION` | optional |
+| `FORGE_MODE_FAST` | deployment name serving `fast` |
+| `FORGE_MODE_BALANCED` | deployment name serving `balanced` |
+| `FORGE_MODE_DEEP` | deployment name serving `deep` |
+| `FORGE_DEFAULT_MODE` | optional; defaults to `balanced` when configured |
+
+Any `FORGE_MODE_<NAME>` defines a mode, so custom modes need no code change.
+`AZURE_OPENAI_DEPLOYMENT` alone points all three standard modes at one
+deployment — enough to start, split later.
+
+`infra/` emits exactly these as a `forge_env` output. See
+[infra/README.md](infra/README.md).
+
+## What you get for free
+
+- **Retries** on 429s, 5xx, and connection failures — honoring `Retry-After`,
+  otherwise exponential backoff with jitter. A stream that already emitted
+  tokens is never retried.
+- **Typed errors** carrying Azure's own code, so you branch on `content_filter`
+  or `context_length_exceeded` without matching strings.
+- **Usage accounting** on every call, including cached and reasoning tokens,
+  with an `OnUsage` hook for cost tracking and budgets.
+- **Reassembled streaming tool calls** — arguments arrive fragmented across SSE
+  frames and are joined before you see them.
+- **Zero dependencies** in Go; only `typescript`/`@types/node` as dev
+  dependencies in Node.
 
 ## Layout
 
 ```
-kernel/            the reusable engine (the IP)
-  model/           LLM providers behind one interface
-  render/          typed output schemas
-  server/          POST /v1/agents/{name}/run  — the uniform API
-agents/            opinionated agents built on the kernel
-  resume/          resume-grill: resume -> interviewer questions (typed)
-  prbot/           (planned) GitHub PR agent — see internal/ webhook plumbing
-cmd/
-  api/             kernel HTTP API server  (the career app / Kronos call this)
-  server/          GitHub App webhook receiver (the PR agent's event entrypoint)
-sdk/ts/            TypeScript client for React apps
-internal/          PR-agent plumbing: GitHub App auth, sandbox clone, profiler
+forge.go, types.go, azure.go, agent.go   the Go kernel
+node/src/                                the Node kernel (same API)
+infra/                                   Azure OpenAI + one deployment per mode
 ```
 
-Two entrypoints share one kernel:
-- **`cmd/api`** — request/response agents (resume-grill, future skill-graph,
-  mock-interview). This is what frontends call.
-- **`cmd/server`** — the GitHub PR agent, which is event-driven (webhook), not
-  request/response. Both are model-bound, so the network hop between a consumer
-  and Forge is <0.1% of total latency — agents are split by *coupling*, never
-  by milliseconds.
-
-## Run the kernel API locally
-
-```bash
-export FORGE_MODEL_PROVIDER=anthropic      # or "azure"
-export ANTHROPIC_API_KEY=sk-ant-...        # for anthropic
-# export AZURE_OPENAI_ENDPOINT=... AZURE_OPENAI_DEPLOYMENT=... AZURE_OPENAI_KEY=...
-go run ./cmd/api                            # :8090
-
-curl -s localhost:8090/v1/agents/resume-grill/run \
-  -H 'content-type: application/json' \
-  -d '{"context":{"resume":"Founding engineer at ISF. Built a Redis→Postgres translation cache with placeholder protection; hardened Stripe webhooks (signature + idempotency); shipped Terraform infra on Azure.","target_role":"Backend SWE"}}' | jq
-```
-
-Returns `{ "kind": "resume_grill", "data": { summary, probes[...] } }` — each
-probe tied to a resume line, with the question an interviewer would ask, what
-it tests, and a model answer.
-
-## Call it from React
-
-```ts
-import { ForgeClient } from "@forge/sdk";
-
-const forge = new ForgeClient({ baseUrl: import.meta.env.VITE_FORGE_URL, apiKey });
-const grill = await forge.resumeGrill({ resume, target_role: "Backend SWE, Stripe" });
-// grill.probes -> render <ProbeCard> for each
-```
-
-## Roadmap
-
-- [x] Kernel seams (model / render / agent registry)
-- [x] Resume-grill agent + typed output + TS SDK
-- [x] GitHub App plumbing (auth, sandbox clone, zero-assumption repo profiler)
-- [ ] PR agent: context engine (RAG + past-PR mining) → verified draft PRs
-- [ ] Skill-graph agent (LeetCode history → mastery map)
-- [ ] Calibrated mock-interview agent (adaptive difficulty / IRT)
-- [ ] Behavioral agent (STAR/CARL critique from real project context)
-- [ ] Budget governor (per-run cost caps, idempotency)
-- [ ] React component library for each output kind
+`azure.go` and `node/src/azure.ts` are the only files that know the vendor's
+wire format. A second provider means one more file each — not a change to
+agents, tools, or call sites.
 
 ## Testing
 
 ```bash
-go test ./...     # agents tested with a fake model — no API key needed
+go test ./...           # Go kernel, against a stub Azure endpoint
+cd node && npm test     # Node kernel, same cases
 ```
+
+Neither suite needs an API key or a network.

@@ -1,7 +1,11 @@
 name: Provision Forge infra
 
-# Plan on PRs that touch infra; apply on merge to main. Auth is OIDC (no stored
-# Azure credentials) — same model as ISF.
+# Plans on PRs that touch infra, applies on merge to main. Auth is OIDC, so no
+# Azure credentials are stored in the repo.
+#
+# The state backend (resource group, storage account, container) is NOT created
+# here — Terraform cannot hold its own backend. Create it once by hand; the
+# commands are in infra/README.md.
 on:
   push:
     branches: [main]
@@ -16,93 +20,40 @@ on:
 
 permissions:
   contents: read
-  id-token: write       # required for azure/login OIDC
-  pull-requests: write  # so the plan can be commented on PRs
+  id-token: write # required for azure/login OIDC
 
 env:
-  ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
-  ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
   ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-  ARM_USE_OIDC:        "true"
-  # The API gate key, provisioned into Key Vault by Terraform.
-  TF_VAR_forge_api_key: ${{ secrets.FORGE_API_KEY }}
-  # State backend location (created once by the bootstrap step below).
-  STATE_RG:        forge-tfstate-rg
-  STATE_SA:        forgetfstatea52008
-  STATE_CONTAINER: tfstate
-  STATE_LOCATION:  eastus
+  ARM_USE_OIDC: "true"
 
 jobs:
-  bootstrap-state:
-    name: Ensure remote state backend exists
-    runs-on: ubuntu-latest
-    steps:
-      - uses: azure/login@v2
-        with:
-          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      # Idempotent: create the RG + storage account + container that hold
-      # Terraform state. This lives OUTSIDE Terraform (chicken-and-egg: TF
-      # can't store its own backend). Safe to run every time.
-      - name: Create state backend if missing
-        run: |
-          az group create --name "$STATE_RG" --location "$STATE_LOCATION" --output none
-          if ! az storage account show --name "$STATE_SA" --resource-group "$STATE_RG" --output none 2>/dev/null; then
-            az storage account create \
-              --name "$STATE_SA" --resource-group "$STATE_RG" \
-              --location "$STATE_LOCATION" --sku Standard_LRS \
-              --encryption-services blob --output none
-          fi
-          az storage container create \
-            --name "$STATE_CONTAINER" \
-            --account-name "$STATE_SA" \
-            --auth-mode login --output none
-
-  plan:
-    name: Plan
-    needs: bootstrap-state
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+  terraform:
+    name: Terraform
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: infra
     steps:
       - uses: actions/checkout@v4
+
       - uses: azure/login@v2
         with:
-          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.9.8
 
       - run: terraform init
-      - run: terraform fmt -check
+
       - run: terraform validate
-      - name: Terraform plan
-        run: terraform plan -no-color -input=false
 
-  apply:
-    name: Apply
-    needs: bootstrap-state
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/login@v2
-        with:
-          client-id:       ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id:       ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.8
+      - run: terraform plan -no-color -input=false -out=tfplan
 
-      - run: terraform init
-      - run: terraform apply -auto-approve -input=false
+      # Only on a merge to main — a PR stops after the plan.
+      - if: github.event_name == 'push'
+        run: terraform apply -no-color -input=false tfplan

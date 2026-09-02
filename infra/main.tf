@@ -1,3 +1,18 @@
+# The shared Forge substrate: ONE Azure OpenAI account with one deployment per
+# mode, provisioned once from this repo and read by every consumer.
+#
+# Why one shared instance rather than a module call inside each app: Azure
+# OpenAI throughput quota is scoped to a subscription and region, not to an
+# account. Standing up an account per app does not buy more capacity, it just
+# splits the same pool into fragments that cannot lend to each other. One
+# account with per-mode deployments keeps the quota pooled and puts rate limits
+# in one place you can reason about.
+#
+# Everything below is a thin call of ./modules/openai. If an app ever needs its
+# own isolated substrate — a different region, a separate quota bucket, a
+# tenant boundary — it calls that module directly instead of reading this
+# state, and gets identical outputs.
+
 terraform {
   required_version = ">= 1.5"
   required_providers {
@@ -7,10 +22,12 @@ terraform {
     }
   }
 
-  # Remote state so CI runs and local runs share one source of truth. The
-  # storage account/container is created once by the `bootstrap` workflow job
-  # (it lives outside Terraform's own state, like ISF's backend-setup). For
-  # local-only use, comment this block out to fall back to local state.
+  # Remote state is what makes this readable by consumers: their Terraform
+  # pulls the endpoint and mode map out of this state with a
+  # terraform_remote_state data source (see README). The storage account and
+  # container are created once by the `bootstrap` workflow job, outside this
+  # state. For local-only use, comment this block out to fall back to local
+  # state.
   backend "azurerm" {
     resource_group_name  = "forge-tfstate-rg"
     storage_account_name = "forgetfstatea52008"
@@ -24,43 +41,10 @@ provider "azurerm" {
   features {}
 }
 
-resource "azurerm_resource_group" "rg" {
-  name     = "${var.name}-rg"
+module "openai" {
+  source = "./modules/openai"
+
+  name     = var.name
   location = var.location
-}
-
-# Azure OpenAI account. `kind = "OpenAI"` is the OpenAI service specifically.
-resource "azurerm_cognitive_account" "openai" {
-  name                = "${var.name}-openai"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  kind                = "OpenAI"
-  sku_name            = "S0"
-
-  # Use a custom subdomain so the regional inference endpoint resolves; the
-  # SDK/HTTP client needs https://<name>.openai.azure.com.
-  custom_subdomain_name = "${var.name}-openai"
-
-  tags = {
-    Project   = "forge"
-    ManagedBy = "Terraform"
-  }
-}
-
-# A model deployment inside the account. The deployment NAME (not the model
-# name) is what Forge sends as AZURE_OPENAI_DEPLOYMENT.
-resource "azurerm_cognitive_deployment" "chat" {
-  name                 = var.deployment_name
-  cognitive_account_id = azurerm_cognitive_account.openai.id
-
-  model {
-    format  = "OpenAI"
-    name    = var.model_name
-    version = var.model_version
-  }
-
-  scale {
-    type     = var.sku_type
-    capacity = var.capacity # thousands of tokens-per-minute
-  }
+  modes    = var.modes
 }

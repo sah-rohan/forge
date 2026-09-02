@@ -16,6 +16,11 @@ forge-runs/
 *.test
 *.out
 
+# Node
+node_modules/
+node/dist/
+node/*.tgz
+
 # Editor
 .DS_Store
 .idea/
