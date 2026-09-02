@@ -1,17 +1,3 @@
-# Binaries
-/forge
-/api
-/server
-*.exe
-
-# Local env
-.env
-.env.*
-
-# Forge run sandboxes (cloned repos)
-/tmp/forge-runs/
-forge-runs/
-
 # Go
 *.test
 *.out
@@ -20,6 +6,10 @@ forge-runs/
 node_modules/
 node/dist/
 node/*.tgz
+
+# Local env
+.env
+.env.*
 
 # Editor
 .DS_Store
