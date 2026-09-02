@@ -1,21 +1,10 @@
 name: Provision Forge infra
 
-# Plans on PRs that touch infra, applies on merge to main. Auth is OIDC, so no
-# Azure credentials are stored in the repo.
-#
-# The state backend (resource group, storage account, container) is NOT created
-# here — Terraform cannot hold its own backend. Create it once by hand; the
-# commands are in infra/README.md.
 on:
   push:
-    branches: [main]
-    paths:
-      - "infra/**"
-      - ".github/workflows/terraform.yml"
+    branches: [master]
   pull_request:
-    branches: [main]
-    paths:
-      - "infra/**"
+    branches: [master]
   workflow_dispatch:
 
 permissions:
